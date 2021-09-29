@@ -45,7 +45,7 @@ import (
 )
 
 const (
-	defaultInitBranch = "master"
+	DefaultInitBranch = "main"
 
 	DefaultLoginUrl = "https://dolthub.com/settings/credentials"
 
@@ -160,7 +160,12 @@ func Load(ctx context.Context, hdp HomeDirProvider, fs filesys.Filesys, urlStr, 
 			// fire and forget cleanup routine.  Will delete as many old temp files as it can during the main commands execution.
 			// The process will not wait for this to finish so this may not always complete.
 			go func() {
-				_ = fs.Iter(dEnv.TempTableFilesDir(), true, func(path string, size int64, isDir bool) (stop bool) {
+				// TODO dEnv.HasDoltTempTableDir() true but dEnv.TempTableFileDir() panics
+				tmpTableDir, err := dEnv.FS.Abs(filepath.Join(dEnv.urlStr, dEnv.GetDoltDir(), tempTablesDir))
+				if err != nil {
+					return
+				}
+				_ = fs.Iter(tmpTableDir, true, func(path string, size int64, isDir bool) (stop bool) {
 					if !isDir {
 						lm, exists := fs.LastModified(path)
 
@@ -201,7 +206,7 @@ func Load(ctx context.Context, hdp HomeDirProvider, fs filesys.Filesys, urlStr, 
 }
 
 func GetDefaultInitBranch(cfg config.ReadableConfig) string {
-	s := GetStringOrDefault(cfg, InitBranchName, defaultInitBranch)
+	s := GetStringOrDefault(cfg, InitBranchName, DefaultInitBranch)
 	return *s
 }
 
@@ -343,11 +348,11 @@ func (dEnv *DoltEnv) bestEffortDeleteAll(dir string) {
 
 // InitRepo takes an empty directory and initializes it with a .dolt directory containing repo state, uncommitted license and readme, and creates a noms
 // database with dolt structure.
-func (dEnv *DoltEnv) InitRepo(ctx context.Context, nbf *types.NomsBinFormat, name, email string) error { // should remove name and email args
-	return dEnv.InitRepoWithTime(ctx, nbf, name, email, doltdb.CommitNowFunc())
+func (dEnv *DoltEnv) InitRepo(ctx context.Context, nbf *types.NomsBinFormat, name, email, branchName string) error { // should remove name and email args
+	return dEnv.InitRepoWithTime(ctx, nbf, name, email, branchName, doltdb.CommitNowFunc())
 }
 
-func (dEnv *DoltEnv) InitRepoWithTime(ctx context.Context, nbf *types.NomsBinFormat, name, email string, t time.Time) error { // should remove name and email args
+func (dEnv *DoltEnv) InitRepoWithTime(ctx context.Context, nbf *types.NomsBinFormat, name, email, branchName string, t time.Time) error { // should remove name and email args
 	doltDir, err := dEnv.createDirectories(".")
 
 	if err != nil {
@@ -357,7 +362,7 @@ func (dEnv *DoltEnv) InitRepoWithTime(ctx context.Context, nbf *types.NomsBinFor
 	err = dEnv.configureRepo(doltDir)
 
 	if err == nil {
-		err = dEnv.InitDBAndRepoState(ctx, nbf, name, email, t)
+		err = dEnv.InitDBAndRepoState(ctx, nbf, name, email, branchName, t)
 	}
 
 	if err != nil {
@@ -432,26 +437,26 @@ func (dEnv *DoltEnv) configureRepo(doltDir string) error {
 }
 
 // Inits the dolt DB of this environment with an empty commit at the time given and writes default docs to disk.
-// Writes new repo state with a master branch and current root hash.
-func (dEnv *DoltEnv) InitDBAndRepoState(ctx context.Context, nbf *types.NomsBinFormat, name, email string, t time.Time) error {
-	err := dEnv.InitDBWithTime(ctx, nbf, name, email, t)
+// Writes new repo state with a main branch and current root hash.
+func (dEnv *DoltEnv) InitDBAndRepoState(ctx context.Context, nbf *types.NomsBinFormat, name, email, branchName string, t time.Time) error {
+	err := dEnv.InitDBWithTime(ctx, nbf, name, email, branchName, t)
 	if err != nil {
 		return err
 	}
 
-	return dEnv.InitializeRepoState(ctx)
+	return dEnv.InitializeRepoState(ctx, branchName)
 }
 
 // Inits the dolt DB of this environment with an empty commit at the time given and writes default docs to disk.
 // Does not update repo state.
-func (dEnv *DoltEnv) InitDBWithTime(ctx context.Context, nbf *types.NomsBinFormat, name, email string, t time.Time) error {
+func (dEnv *DoltEnv) InitDBWithTime(ctx context.Context, nbf *types.NomsBinFormat, name, email, branchName string, t time.Time) error {
 	var err error
 	dEnv.DoltDB, err = doltdb.LoadDoltDB(ctx, nbf, dEnv.urlStr, dEnv.FS)
 	if err != nil {
 		return err
 	}
 
-	err = dEnv.DoltDB.WriteEmptyRepoWithCommitTime(ctx, GetDefaultInitBranch(dEnv.Config), name, email, t)
+	err = dEnv.DoltDB.WriteEmptyRepoWithCommitTime(ctx, branchName, name, email, t)
 	if err != nil {
 		return doltdb.ErrNomsIO
 	}
@@ -459,9 +464,8 @@ func (dEnv *DoltEnv) InitDBWithTime(ctx context.Context, nbf *types.NomsBinForma
 	return nil
 }
 
-// InitializeRepoState writes a default repo state to disk, consisting of a master branch and current root hash value.
-func (dEnv *DoltEnv) InitializeRepoState(ctx context.Context) error {
-	branchName := GetDefaultInitBranch(dEnv.Config)
+// InitializeRepoState writes a default repo state to disk, consisting of a main branch and current root hash value.
+func (dEnv *DoltEnv) InitializeRepoState(ctx context.Context, branchName string) error {
 	commit, err := dEnv.DoltDB.ResolveCommitRef(ctx, ref.NewBranchRef(branchName))
 	if err != nil {
 		return err
@@ -1178,4 +1182,8 @@ func GetGCKeepers(ctx context.Context, env *DoltEnv) ([]hash.Hash, error) {
 
 func (dEnv *DoltEnv) DbEaFactory() editor.DbEaFactory {
 	return editor.NewDbEaFactory(dEnv.TempTableFilesDir(), dEnv.DoltDB.ValueReadWriter())
+}
+
+func (dEnv *DoltEnv) BulkDbEaFactory() editor.DbEaFactory {
+	return editor.NewBulkImportTEAFactory(dEnv.DoltDB.Format(), dEnv.DoltDB.ValueReadWriter(), dEnv.TempTableFilesDir())
 }
